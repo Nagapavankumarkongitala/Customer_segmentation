@@ -1,0 +1,16 @@
+# Core dependencies for the Customer Segmentation & Retention Dashboard
+streamlit>=1.28.0
+pandas>=2.2.0
+numpy>=1.26.0
+scikit-learn>=1.4.0
+plotly>=5.15.0
+
+# Deep learning (optional – required for Autoencoder & Deep Churn Prediction)
+# TensorFlow is not available for Python 3.14 on this platform.
+# PyTuv run app.pyorch is an alternative: uncomment the line below to install it.
+torch
+# For TensorFlow, use Python 3.10-3.12 instead:
+tensorflow
+
+# Optional: extra clustering helpers (mentioned in CLAUDE.md)
+# scikit-learn-extra>=0.2.0
