@@ -40,6 +40,11 @@ def calculate_rfm(transactions_df, customers_df=None, snapshot_date=None):
         if col in df.columns:
             rfm_df[col] = df.groupby('CustomerID')[col].first()
 
+    # Retain purchase timing (month/year) per customer for trend analysis
+    rfm_df['FirstPurchaseYear'] = df.groupby('CustomerID')['TransactionDate'].min().dt.year.values
+    rfm_df['LastPurchaseYear'] = df.groupby('CustomerID')['TransactionDate'].max().dt.year.values
+    rfm_df['LastPurchaseMonth'] = df.groupby('CustomerID')['TransactionDate'].max().dt.month.values
+
     return rfm_df
 
 def assign_rfm_segments(rfm_df, num_segments=5):
@@ -92,6 +97,112 @@ def assign_rfm_segments(rfm_df, num_segments=5):
 
     rfm_df['Simplified_RFM_Segment'] = rfm_df.apply(assign_simplified_segment, axis=1)
     return rfm_df
+
+def extract_time_features(df):
+    """Add Month/Year columns extracted from TransactionDate (copy returned)."""
+    df = df.copy()
+    tx = pd.to_datetime(df['TransactionDate'], errors='coerce')
+    df['TransactionYear'] = tx.dt.year
+    df['TransactionMonth'] = tx.dt.month
+    df['TransactionYearMonth'] = tx.dt.strftime('%Y-%m')
+    return df
+
+
+def analyze_yearly_sales(transactions_df):
+    """Year-wise sales summary with YoY growth.
+
+    Returns DataFrame: Year, TotalSales, Transactions, Customers,
+    AvgOrderValue, YoY_Growth_Pct.
+    """
+    tx = extract_time_features(transactions_df)
+    tx = tx.dropna(subset=['TransactionYear'])
+    tx['Amount'] = pd.to_numeric(tx['Amount'], errors='coerce').fillna(0)
+    yearly = tx.groupby(tx['TransactionYear'].astype(int)).agg(
+        TotalSales=('Amount', 'sum'),
+        Transactions=('Amount', 'count'),
+        Customers=('CustomerID', 'nunique'),
+    ).reset_index().rename(columns={'TransactionYear': 'Year'})
+    yearly = yearly.sort_values('Year').reset_index(drop=True)
+    yearly['AvgOrderValue'] = (yearly['TotalSales'] / yearly['Transactions'].replace(0, np.nan)).fillna(0).round(2)
+    yearly['TotalSales'] = yearly['TotalSales'].round(2)
+    yearly['YoY_Growth_Pct'] = yearly['TotalSales'].pct_change().mul(100).round(2)
+    return yearly
+
+
+SEGMENT_ORDER = ['Champions', 'Loyal Customers', 'Potential Loyalists',
+                 'Need Attention', 'Hibernating', 'Other']
+
+
+def analyze_yearly_segment_trends(transactions_df):
+    """Segment-group counts per year with YoY change.
+
+    Recomputes RFM + simplified segments within each transaction year so
+    growth/decline of Champions, Loyal Customers, etc. is visible.
+    Returns long DataFrame: Year, Segment, Customers, YoY_Change_Pct.
+    """
+    tx = extract_time_features(transactions_df)
+    tx = tx.dropna(subset=['TransactionYear', 'TransactionDate', 'CustomerID'])
+    tx['TransactionDate'] = pd.to_datetime(tx['TransactionDate'], errors='coerce')
+    tx['Amount'] = pd.to_numeric(tx['Amount'], errors='coerce').fillna(0)
+
+    frames = []
+    for year in sorted(tx['TransactionYear'].astype(int).unique()):
+        ydf = tx[tx['TransactionYear'].astype(int) == year]
+        if ydf.empty:
+            continue
+        snapshot = datetime(year, 12, 31) + timedelta(days=1)
+        rec = ydf.groupby('CustomerID')['TransactionDate'].max().apply(lambda x: (snapshot - x).days)
+        freq = ydf.groupby('CustomerID')['Amount'].count()
+        mon = ydf.groupby('CustomerID')['Amount'].sum().round(2)
+        yearly_rfm = pd.DataFrame({'CustomerID': rec.index, 'Recency': rec.values,
+                                   'Frequency': freq.values, 'Monetary': mon.values})
+        yearly_rfm = assign_rfm_segments(yearly_rfm)
+        counts = yearly_rfm['Simplified_RFM_Segment'].value_counts()
+        for seg in SEGMENT_ORDER:
+            frames.append({'Year': int(year), 'Segment': seg,
+                           'Customers': int(counts.get(seg, 0))})
+
+    trends = pd.DataFrame(frames, columns=['Year', 'Segment', 'Customers'])
+    if not trends.empty:
+        trends['YoY_Change_Pct'] = (trends.groupby('Segment')['Customers']
+                                    .pct_change().mul(100).round(2))
+    else:
+        trends['YoY_Change_Pct'] = pd.Series(dtype=float)
+    return trends
+
+
+def plot_yearly_sales_chart(yearly_df):
+    """Plotly chart: year-wise sales bars + YoY growth line."""
+    import plotly.graph_objects as go
+    yearly_df = yearly_df.copy().sort_values('Year')
+    fig = go.Figure()
+    fig.add_bar(x=yearly_df['Year'], y=yearly_df['TotalSales'],
+                name='Total Sales ($)', marker_color='#5b7cff')
+    if yearly_df['YoY_Growth_Pct'].notna().sum() > 0:
+        fig.add_scatter(x=yearly_df['Year'], y=yearly_df['YoY_Growth_Pct'],
+                        name='YoY Growth (%)', mode='lines+markers',
+                        marker_color='#22d3ee', yaxis='y2')
+    fig.update_layout(
+        title='Year-wise Sales & YoY Growth',
+        xaxis_title='Year', yaxis_title='Total Sales ($)',
+        yaxis2=dict(title='YoY Growth (%)', overlaying='y', side='right',
+                    showgrid=False),
+        template='plotly_dark', height=380,
+        margin=dict(l=30, r=30, t=50, b=30),
+    )
+    return fig
+
+
+def plot_segment_trend_chart(trends_df):
+    """Plotly chart: segment-group customer counts per year (growth/decline)."""
+    import plotly.express as px
+    order = [s for s in SEGMENT_ORDER if s in trends_df['Segment'].unique()]
+    fig = px.line(trends_df, x='Year', y='Customers', color='Segment',
+                  markers=True, title='Segment Groups: Yearly Movement',
+                  category_orders={'Segment': order},
+                  template='plotly_dark')
+    fig.update_layout(height=380, margin=dict(l=30, r=30, t=50, b=30))
+    return fig
 
 def analyze_demographics(rfm_df):
     """Analyze customer behavior and churn across demographic segments."""
@@ -162,6 +273,8 @@ def process_single_dataset(df, snapshot_date=None):
         rfm_data = calculate_rfm(df, customers_df=None, snapshot_date=snapshot_date)
         rfm_data = assign_rfm_segments(rfm_data)
         demographic_insights, rfm_data_with_age = analyze_demographics(rfm_data)
+        demographic_insights['yearly_sales'] = analyze_yearly_sales(df)
+        demographic_insights['segment_trends'] = analyze_yearly_segment_trends(df)
         rfm_processed = perform_advanced_segmentation(rfm_data_with_age)
         rfm_processed = train_churn_prediction_model(rfm_processed)
         processed_df = rfm_processed.reset_index()
@@ -234,15 +347,28 @@ def process_customers(customers_df, transactions_df, snapshot_date=None):
 
 # --- Main execution if run as a script ---
 if __name__ == "__main__":
-    try:
-        customers_df = pd.read_csv("customers.csv")
-        transactions_df = pd.read_csv("transactions.csv")
-    except FileNotFoundError:
-        print("CSV files not found. Please run data_generator.py first.")
-        exit()
+    import os
+    processed = None
+    demographic_insights = {}
+    # Preferred: single transaction-level sample file (see data_generator.py).
+    if os.path.exists("sample_transactions.csv"):
+        df = pd.read_csv("sample_transactions.csv")
+        processed_df, demographic_insights = process_single_dataset(df)
+        processed = processed_df.reset_index(drop=True)
+    else:
+        try:
+            customers_df = pd.read_csv("customers.csv")
+            transactions_df = pd.read_csv("transactions.csv")
+        except FileNotFoundError:
+            print("CSV files not found. Please run data_generator.py first.")
+            exit()
+        processed, demographic_insights = process_customers(customers_df, transactions_df)
+        processed = processed.reset_index(drop=True)
+        if 'TransactionDate' in transactions_df.columns:
+            demographic_insights['yearly_sales'] = analyze_yearly_sales(transactions_df)
+            demographic_insights['segment_trends'] = analyze_yearly_segment_trends(transactions_df)
 
-    processed, demographic_insights = process_customers(customers_df, transactions_df)
-    processed.to_csv("processed_customer_data.csv", index=True)
+    processed.to_csv("processed_customer_data.csv", index=False)
     print("\nProcessed data saved to processed_customer_data.csv")
 
     if 'gender_agg' in demographic_insights:
@@ -251,3 +377,12 @@ if __name__ == "__main__":
     if 'age_agg' in demographic_insights:
         print("\nDemographic Insights (Age Group Aggregation):")
         print(demographic_insights['age_agg'])
+    if 'yearly_sales' in demographic_insights:
+        print("\nYear-wise Sales:")
+        print(demographic_insights['yearly_sales'].to_string(index=False))
+        demographic_insights['yearly_sales'].to_csv("yearly_sales.csv", index=False)
+    if 'segment_trends' in demographic_insights:
+        print("\nYearly Segment Trends (pivot: customers per segment):")
+        print(demographic_insights['segment_trends'].pivot(
+            index='Year', columns='Segment', values='Customers').to_string())
+        demographic_insights['segment_trends'].to_csv("yearly_segment_trends.csv", index=False)

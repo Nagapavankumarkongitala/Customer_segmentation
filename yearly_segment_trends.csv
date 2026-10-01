@@ -1,0 +1,19 @@
+Year,Segment,Customers,YoY_Change_Pct
+2022,Champions,173,
+2022,Loyal Customers,188,
+2022,Potential Loyalists,47,
+2022,Need Attention,52,
+2022,Hibernating,183,
+2022,Other,320,
+2023,Champions,170,-1.73
+2023,Loyal Customers,198,5.32
+2023,Potential Loyalists,45,-4.26
+2023,Need Attention,51,-1.92
+2023,Hibernating,184,0.55
+2023,Other,344,7.5
+2024,Champions,168,-1.18
+2024,Loyal Customers,205,3.54
+2024,Potential Loyalists,41,-8.89
+2024,Need Attention,45,-11.76
+2024,Hibernating,185,0.54
+2024,Other,355,3.2

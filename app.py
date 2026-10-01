@@ -24,6 +24,10 @@ from data_preprocessing import (
     calculate_rfm,
     assign_rfm_segments,
     analyze_demographics,
+    analyze_yearly_sales,
+    analyze_yearly_segment_trends,
+    plot_yearly_sales_chart,
+    plot_segment_trend_chart,
     perform_advanced_segmentation,
     train_churn_prediction_model,
     process_single_dataset,
@@ -486,7 +490,101 @@ def build_geo_map(df, value_col='Monetary', agg='sum', title="Geographic Perform
 
     return None, None
 
-@st.cache_data
+@st.cache_data(show_spinner=False)
+def load_sample_transactions():
+    try:
+        tx = pd.read_csv("sample_transactions.csv")
+        tx['TransactionDate'] = pd.to_datetime(tx['TransactionDate'], errors='coerce')
+        tx['Amount'] = pd.to_numeric(tx['Amount'], errors='coerce').fillna(0)
+        return tx.dropna(subset=['TransactionDate', 'CustomerID'])
+    except FileNotFoundError:
+        return None
+    except Exception:
+        return None
+
+
+@st.cache_data(show_spinner=False)
+def cached_time_aggregates(ids_key, n_tx, amt_sum, max_date):
+    """Yearly sales + segment trends for one sliced customer set.
+
+    Cached so moving any slicer/widget reuses prior results instead of
+    recomputing per-year RFM + quintile segmentation from scratch.
+    ids_key must be a sorted tuple of CustomerIDs; the tx signature
+    (n_tx, amt_sum, max_date) invalidates the cache when the file changes.
+    """
+    tx = load_sample_transactions()
+    if tx is None:
+        return None, None
+    scoped = tx[tx['CustomerID'].isin(ids_key)]
+    if scoped.empty:
+        return pd.DataFrame(), pd.DataFrame()
+    return analyze_yearly_sales(scoped), analyze_yearly_segment_trends(scoped)
+
+
+@st.cache_data(show_spinner=False)
+def load_yearly_artifacts():
+    """Precomputed yearly_sales.csv / yearly_segment_trends.csv fallback."""
+    try:
+        return pd.read_csv("yearly_sales.csv"), pd.read_csv("yearly_segment_trends.csv")
+    except FileNotFoundError:
+        return None, None
+    except Exception:
+        return None, None
+
+
+def render_yearly_time_charts(customer_ids, key_prefix):
+    """Year-wise sales + segment movement charts for a sliced customer set.
+
+    Slicer-aware when sample_transactions.csv exists (filters to the given
+    CustomerIDs); otherwise falls back to the precomputed yearly_sales.csv /
+    yearly_segment_trends.csv artifacts.
+    """
+    tx = load_sample_transactions()
+    if tx is not None:
+        ids_key = tuple(sorted(set(pd.Series(list(customer_ids)).dropna().tolist())))
+        if not ids_key:
+            st.info("No customers in the sliced scope for year-wise charts.")
+            return
+        tx_sig = (len(tx), round(float(tx['Amount'].sum()), 2),
+                  str(tx['TransactionDate'].max()))
+        yearly, trends = cached_time_aggregates(ids_key, *tx_sig)
+        if yearly is None or yearly.empty:
+            st.info("No transactions in the sliced scope for year-wise charts.")
+            return
+        scope_note = "sliced scope"
+    else:
+        yearly, trends = load_yearly_artifacts()
+        if yearly is None or trends is None:
+            st.info("Year-wise charts need sample_transactions.csv — run data_generator.py first.")
+            return
+        scope_note = "global (all customers)"
+
+    if yearly.empty:
+        st.info("Not enough dated transactions for year-wise charts.")
+        return
+    last_yoy = yearly['YoY_Growth_Pct'].dropna()
+    yoy_txt = f"{last_yoy.iloc[-1]:+.1f}% YoY" if len(last_yoy) else "single year"
+    if not trends.empty:
+        latest_year = int(trends['Year'].max())
+        movers = trends[trends['Year'] == latest_year].sort_values('YoY_Change_Pct', ascending=False)
+        top = movers.iloc[0]
+        mover_txt = f"{top['Segment']} {top['YoY_Change_Pct']:+.1f}% in {latest_year}"
+    else:
+        mover_txt = "n/a"
+    st.caption(f"📅 Year-wise view ({scope_note}) • Sales {yoy_txt} • Top segment mover: {mover_txt}")
+
+    t1, t2 = st.columns(2)
+    with t1:
+        st.plotly_chart(style_plotly_fig(plot_yearly_sales_chart(yearly), height=380),
+                        use_container_width=True, theme=None)
+    with t2:
+        if not trends.empty:
+            st.plotly_chart(style_plotly_fig(plot_segment_trend_chart(trends), height=380),
+                            use_container_width=True, theme=None)
+        else:
+            st.info("Not enough history for segment movement.")
+
+@st.cache_data(show_spinner=False)
 def load_data():
     try:
         df = pd.read_csv("processed_customer_data.csv")
@@ -1204,6 +1302,9 @@ if customer_df is not None:
             else:
                 st.info("Add Country or 2-letter US State codes to enable the map.")
 
+            st.markdown("##### 📅 Year-wise Sales & Segment Movement")
+            render_yearly_time_charts(df_ov['CustomerID'], key_prefix="ov")
+
             # --- TIER 3: TABULAR REPRESENTATION ---
             st.markdown('<div class="section-tier-header"><span class="tier-tag">Tier 3</span> Segment Summary & Customer Data Table</div>', unsafe_allow_html=True)
             st.markdown("##### 📊 RFM Segment Executive Aggregation Table")
@@ -1402,6 +1503,9 @@ if customer_df is not None:
                 st.plotly_chart(rfm_map, use_container_width=True, theme=None)
             else:
                 st.info("Add Country or US State codes to render the footprint map.")
+
+            st.markdown("##### 📅 Year-wise Sales & Segment Movement")
+            render_yearly_time_charts(df_rfm['CustomerID'], key_prefix="rfm")
 
             # --- TIER 3: TABULAR REPRESENTATION ---
             st.markdown('<div class="section-tier-header"><span class="tier-tag">Tier 3</span> RFM Segment Summary & Detailed Customer Scores</div>', unsafe_allow_html=True)
